@@ -1,7 +1,7 @@
 # chunked-parallel
 
-A dependency-free Rust model of Blender's `BLI_task_parallel_range` **data-flow
-semantics**: grain size, `firstprivate` chunk copies, and the reduction merge.
+A dependency-free Rust model of Blender's task scheduling: data-parallel ranges
+with `firstprivate` chunk copies, plus explicit task pools and dependency graphs.
 
 It exists to answer one question precisely: *what exactly happens to the data
 between "split the range" and "one merged result"*, and what stays invariant
@@ -46,6 +46,49 @@ parallel : 12.78329081042960524   delta -2.149e-13   (MergeOrder::Tree)
 ```
 
 That delta is not a bug; it is the reason `parallel_deterministic_reduce` exists.
+
+## Layer 2 — tasks and dependency graphs
+
+`TaskPool` mirrors the five `BLI_task_pool_create*` flavours, resolved against
+the worker count the way Blender resolves them:
+
+| `PoolKind` | Behaviour |
+|---|---|
+| `Immediate` | starts on push; runs inline when there is a single worker |
+| `Background` | never blocks the caller; **promoted to the shared pool when threads > 1** |
+| `BackgroundSerial` | one task at a time, always off the caller's thread |
+| `Suspended` | runs nothing until `work_and_wait()` |
+| `NoThreads` | runs inline on the caller; for debugging |
+
+One process-wide queue serves every pool — Blender's "single queue [that] holds
+the task from all pools" — and `work_and_wait()` **drains the queue while it
+waits**, the same reason `tbb::task_group::wait()` "can actually do work". That
+is what stops a pool nested inside a task from deadlocking when every worker is
+already busy.
+
+`TaskGraph` is a forest of directed trees with **edge-triggered** propagation:
+
+```rust
+use chunked_parallel::TaskGraph;
+
+let graph = TaskGraph::new();
+let root = graph.add_node(|| println!("root"));
+let a = graph.add_node(|| println!("a"));
+let b = graph.add_node(|| println!("b"));
+let c = graph.add_node(|| println!("c"));
+
+graph.add_edge(root, a);
+graph.add_edge(root, b);
+graph.add_edge(a, c);
+graph.add_edge(b, c); // two parents
+
+graph.push_work(root);
+graph.wait();
+// c ran TWICE: once per completed parent edge, not once as an AND-join.
+```
+
+Priority is accepted and recorded but not acted upon: Blender drops it on
+TBB 2021+ (`TBB_INTERFACE_VERSION_MAJOR >= 12`), which Blender 5.x ships.
 
 ## Install
 
@@ -162,22 +205,27 @@ assert_eq!(done.stats.clones, done.stats.chunks);
 ## Verify
 
 ```sh
-cargo test --release     # 8 behavioural tests + 1 doctest
+cargo test --release     # 21 behavioural tests + 1 doctest
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
 The suite asserts the invariants directly: no clone on the serial path, one
 clone per chunk on the parallel path, `n-1` joins, grain flooring, the
-`threads * 4` over-decomposition, and run-to-run reproducibility of the ordered
-fold.
+`threads * 4` over-decomposition, run-to-run reproducibility of the ordered
+fold, suspended pools staying idle until waited on, serial pools never
+overlapping, nested pools not deadlocking, and a diamond graph triggering its
+shared child exactly twice.
 
 ## Scope
 
-Phase 1 of a larger study of Blender's scheduler. Not yet modelled:
-`TaskPool` (immediate/background/suspended pools), `TaskGraph` (edge-triggered
-DAG propagation), and the newer `blender::threading` layer with
-`TaskSizeHints`. Those are Phase 2.
+Phases 1–2 are implemented: data-parallel ranges, `TaskPool` (all five
+flavours) and `TaskGraph` with edge-triggered propagation.
+
+Not yet modelled: the newer `blender::threading` layer — `TaskSizeHints`
+(`Static`, `IndividualLookup` with greedy bucketing, `AccumulatedLookup` with
+recursive bisection), `IndexMask::foreach_segment`, `memory_bandwidth_bound_task`
+and `max_threads_task`. That is Phase 3.
 
 ## License
 
