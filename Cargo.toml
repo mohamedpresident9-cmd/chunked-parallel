@@ -1,0 +1,24 @@
+[package]
+name = "chunked-parallel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.73"
+description = "Rust simulator of Blender BLI_task parallel-range data-flow semantics (grain size, firstprivate chunks, reduction merge)"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mohamedpresident9-cmd/chunked-parallel"
+keywords = ["parallel", "scheduler", "blender", "simulator", "reduction"]
+categories = ["concurrency"]
+
+[lib]
+name = "chunked_parallel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cpx"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

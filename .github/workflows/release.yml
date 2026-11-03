@@ -1,0 +1,89 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Static musl build: works on Arch rolling release and on immutable
+      # Fedora-atomic images (Bazzite) without any glibc version constraint.
+      - name: toolchain for x86_64-musl
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "RUSTFLAGS=-C linker=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: toolchain for aarch64-musl
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: smoke test (native target only)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --release
+
+      - name: package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          tar -czf "../../../cpx-${{ matrix.target }}.tar.gz" cpx
+          cd ../../..
+          tar -tzf "cpx-${{ matrix.target }}.tar.gz"
+
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/cpx.exe" `
+                           -DestinationPath "cpx-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpx-${{ matrix.target }}
+          path: |
+            cpx-*.tar.gz
+            cpx-*.zip
+          if-no-files-found: error
+
+      - name: publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cpx-*.tar.gz
+            cpx-*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: false
