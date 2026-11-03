@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — Phase 7: distribution and provenance
+
+### Added
+
+- `packaging/aur/PKGBUILD` (`-git` flavour) and `packaging/README.md`, covering
+  Arch/Manjaro/EndeavourOS/CachyOS, Bazzite and Windows.
+- `docs/verification.md`: every modelled layer anchored to the shipped
+  `blender.exe` 5.3 beta through its PDB — symbol addresses, prefix counts, and
+  an explicit list of what is *not* verified.
+- README: AUR install path and a verification section.
+
+### Verified
+
+- `cargo package --offline` builds the crate standalone: 26 files, 149 KiB
+  (42 KiB compressed). `cargo publish --dry-run` could not reach crates.io from
+  this sandbox, so the upload step itself remains untested.
+
 ## [0.6.0] — Phase 6: cost shape
 
 ### Added

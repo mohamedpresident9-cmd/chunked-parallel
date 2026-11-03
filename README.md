@@ -148,6 +148,18 @@ cargo install --path .
 cargo build --release   # target/release/cpx
 ```
 
+### Arch Linux (AUR)
+
+```sh
+git clone https://github.com/mohamedpresident9-cmd/chunked-parallel
+cd chunked-parallel/packaging/aur && makepkg -si
+```
+
+`packaging/aur/PKGBUILD` is the `-git` flavour, so it never goes stale. See
+[packaging/README.md](packaging/README.md) for Bazzite and for the AUR upload
+steps.
+
+
 ## Platform notes
 
 **Windows** — `cargo install --path .` or unzip the asset; `cpx.exe` is
@@ -375,6 +387,13 @@ Deliberately not modelled, and documented where it matters:
 - `parallel_invoke` is variadic in C++; here it is `parallel_invoke2`.
 - The full `IndexMask` (expression trees, virtual arrays) is out of scope; only
   range segments and their parallel iteration are projected.
+
+## Verification
+
+Every layer is anchored twice: to the public source, and to the shipped
+`blender.exe` 5.3 beta through the 318 602 public symbols in its PDB.
+[docs/verification.md](docs/verification.md) lists the addresses, the symbol
+counts, and — just as important — what is *not* verified.
 
 ## License
 

@@ -1,0 +1,46 @@
+# Maintainer: mohamedpresident9-cmd <mohamedpresident9-cmd@users.noreply.github.com>
+#
+# Arch Linux (and derivatives: Manjaro, EndeavourOS, CachyOS, Garuda, ...)
+# packaging for the `chunked-parallel` CLI and library.
+#
+# This is the -git flavour: it always builds the current default branch, so it
+# needs no release-asset checksums. The static musl binaries published on GitHub
+# Releases remain the zero-dependency alternative (see scripts/install.sh).
+
+pkgname=chunked-parallel-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="Model of Blender's task scheduling: parallel ranges, task pools, edge-triggered graphs, threading layer"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mohamedpresident9-cmd/chunked-parallel"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo' 'rust')
+provides=('chunked-parallel' 'cpx')
+conflicts=('chunked-parallel' 'cpx')
+options=(!lto)
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${pkgname}"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "${pkgname}"
+  # No dependencies, so this works with the network disabled in a clean chroot.
+  cargo build --release --locked
+}
+
+check() {
+  cd "${pkgname}"
+  cargo test --release --locked
+}
+
+package() {
+  cd "${pkgname}"
+  install -Dm755 target/release/cpx "${pkgdir}/usr/bin/cpx"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}
