@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — Phase 4: measure instead of assume
+
+### Added
+
+- `cpx bench`: a two-scenario benchmark of the four splitting strategies over a
+  workload whose cost is clustered, with a verified-identical work count for
+  every strategy.
+- The benchmark reports chunk counts, best and median wall clock, and speedup
+  against the serial loop, for a fine and a coarse grain.
+- Observed on the development machine (20k items, 12 workers): at a fine grain
+  `static(size=1)` leads (6.00x) and the cost-aware hints pay overhead; at a
+  coarse grain `static(size=1)` stops scaling entirely (1.02x) while
+  `accumulated` reaches 6.38x.
+
+### Changed
+
+- Version 0.4.0; README documents the benchmark and how to read it.
+
 ## [0.3.0] — Phase 3: the modern `blender::threading` layer
 
 ### Added

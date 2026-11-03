@@ -194,6 +194,12 @@ GRAPH OPTIONS (cpx graph):
   --fanout <N>    children per node                     [default: 2]
   --delay <MS>    simulated work per node               [default: 20]
   --diamond       build root -> a,b -> c (c has 2 parents)
+
+BENCH OPTIONS (cpx bench):
+  --items <N>     items in the synthetic workload       [default: 20000]
+  --grain <N>     grain for the fine-grain scenario     [default: 64]
+  --heavy <PCT>   share of indices that are expensive   [default: 10]
+  --repeats <N>   timed runs per strategy               [default: 3]
 ```
 
 Example:
@@ -231,6 +237,35 @@ root  ×1
 
 `c` appears under both parents and ran twice: edge-triggered propagation, made
 visible instead of argued about.
+
+## What the benchmark shows
+
+`cpx bench` runs the same clustered workload twice — once with a fine grain, once
+with a grain so coarse that ten chunks cover the whole range — and verifies that
+every strategy computes an identical amount of work.
+
+Observed on the development machine (20 000 items, 12 workers):
+
+| scenario | strategy | chunks | best | speedup |
+|---|---|---|---|---|
+| fine (grain 64) | `static(size=1)` | 313 | 0.79 ms | **6.00x** |
+| fine | `accumulated` | 2923 | 0.98 ms | 4.82x |
+| coarse (grain 2000) | `static(size=1)` | 10 | 4.89 ms | **1.02x** |
+| coarse | `accumulated` | 2033 | 0.78 ms | **6.38x** |
+| both | `static(size=20000)` | 20000 | ~2.3 ms | ~2x |
+
+Two lessons, visible in the numbers rather than asserted in prose:
+
+1. **With many chunks, dynamic work-stealing already rebalances a clustered
+   cost.** The cost-aware hints then mostly pay scheduling overhead, and can be
+   slightly slower than plain uniform chunks.
+2. **With a coarse partition one chunk can absorb the entire hot region** and
+   parallelism collapses to the serial time (1.02x). That is exactly the case the
+   cost-aware hints exist for.
+
+The `static(size=20000)` row is the cautionary one: claiming a per-task size that
+does not match reality explodes the chunk count to one item per chunk and caps
+the speedup near 2x whatever the grain is.
 
 ## Library use
 
