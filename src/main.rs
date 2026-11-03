@@ -91,6 +91,13 @@ BENCH OPTIONS:
     --heavy <PCT>   share of indices that are expensive   [default: 10]
     --repeats <N>   timed runs per strategy               [default: 3]
 
+SWEEP OPTIONS (cpx sweep):
+    --items <N>     items in the synthetic workload       [default: 20_000]
+    --heavy <LIST>  comma separated heavy shares          [default: 0,10,25,50]
+    --grains <LIST> comma separated grain values          [default: 8..2048]
+    --repeats <N>   timed runs per cell                   [default: 2]
+    --csv <PATH>    write every measurement as CSV
+
 Graph mode prints a live start/finish trace and, when done, the tree with the
 number of times each node actually ran. Ordering varies between runs: that is
 real parallelism, not a bug. Bench mode compares the four splitting strategies
@@ -494,6 +501,8 @@ struct BenchOptions {
     grain: i64,
     heavy_percent: i64,
     repeats: usize,
+    heavy_cost: i64,
+    light_cost: i64,
 }
 
 struct BenchRow {
@@ -509,6 +518,8 @@ fn parse_bench(mut args: impl Iterator<Item = String>) -> Result<BenchOptions, S
         grain: 64,
         heavy_percent: 10,
         repeats: 3,
+        heavy_cost: HEAVY_COST,
+        light_cost: LIGHT_COST,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -557,10 +568,14 @@ fn parse_bench(mut args: impl Iterator<Item = String>) -> Result<BenchOptions, S
 /// Deterministic per-item cost: the first `heavy_end` indices are expensive,
 /// the rest are cheap. Clustering the cost is what separates the strategies.
 fn item_cost(index: i64, heavy_end: i64) -> i64 {
+    item_cost_with(index, heavy_end, HEAVY_COST, LIGHT_COST)
+}
+
+fn item_cost_with(index: i64, heavy_end: i64, heavy_cost: i64, light_cost: i64) -> i64 {
     if index < heavy_end {
-        HEAVY_COST
+        heavy_cost
     } else {
-        LIGHT_COST
+        light_cost
     }
 }
 
@@ -596,7 +611,12 @@ fn measure(
         parallel_for(range, grain, hints, |sub| {
             let mut local = 0u64;
             for index in sub.iter() {
-                local = local.wrapping_add(burn(item_cost(index, heavy_end)));
+                local = local.wrapping_add(burn(item_cost_with(
+                    index,
+                    heavy_end,
+                    options.heavy_cost,
+                    options.light_cost,
+                )));
             }
             work.fetch_add(local, Ordering::Relaxed);
         });
@@ -767,10 +787,305 @@ fn run_bench(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Sweep demonstrator
+// ---------------------------------------------------------------------------
+
+struct SweepOptions {
+    items: i64,
+    heavy: Vec<i64>,
+    grains: Vec<i64>,
+    repeats: usize,
+    csv: Option<String>,
+    concentration: f64,
+}
+
+struct HintSet {
+    static_unit: chunked_parallel::threading::TaskSizeHints,
+    individual: chunked_parallel::threading::TaskSizeHints,
+    accumulated: chunked_parallel::threading::TaskSizeHints,
+}
+
+fn parse_list(text: &str) -> Result<Vec<i64>, String> {
+    text.split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<i64>()
+                .map_err(|_| format!("not a number: {part}"))
+        })
+        .collect()
+}
+
+fn parse_sweep(mut args: impl Iterator<Item = String>) -> Result<SweepOptions, String> {
+    let mut options = SweepOptions {
+        items: 20_000,
+        heavy: vec![0, 10, 25, 50],
+        grains: Vec::new(),
+        repeats: 2,
+        csv: None,
+        concentration: 100.0,
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--items" => {
+                options.items = args
+                    .next()
+                    .ok_or("--items needs a value")?
+                    .parse()
+                    .map_err(|_| "--items expects an integer")?
+            }
+            "--heavy" => options.heavy = parse_list(&args.next().ok_or("--heavy needs a value")?)?,
+            "--grains" => {
+                options.grains = parse_list(&args.next().ok_or("--grains needs a value")?)?
+            }
+            "--repeats" => {
+                options.repeats = args
+                    .next()
+                    .ok_or("--repeats needs a value")?
+                    .parse()
+                    .map_err(|_| "--repeats expects an integer")?
+            }
+            "--csv" => options.csv = Some(args.next().ok_or("--csv needs a path")?),
+            "--concentration" => {
+                options.concentration = args
+                    .next()
+                    .ok_or("--concentration needs a value")?
+                    .parse()
+                    .map_err(|_| "--concentration expects a number")?
+            }
+            "-h" | "--help" => {
+                println!("{}", range_usage());
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    if options.grains.is_empty() {
+        options.grains = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+            .into_iter()
+            .filter(|grain| *grain < options.items)
+            .collect();
+    }
+    options.heavy.retain(|share| (0..=100).contains(share));
+    options.grains.retain(|grain| *grain > 0);
+    if options.items <= 0 || options.grains.is_empty() || options.heavy.is_empty() {
+        return Err("sweep needs positive --items, --grains and --heavy values".to_string());
+    }
+    if options.repeats == 0 {
+        return Err("--repeats must be positive".to_string());
+    }
+    Ok(options)
+}
+
+/// Build the three hints for one cost shape.
+///
+/// Mirrors the construction in `run_bench`; kept separate because the sweep
+/// rebuilds them per heavy share while `run_bench` builds them once.
+fn hint_set(items: i64, heavy_end: i64, heavy_cost: i64, light_cost: i64) -> HintSet {
+    use chunked_parallel::threading::{IndexRange, TaskSizeHints};
+    use std::sync::Arc;
+
+    let mut prefix: Vec<i64> = Vec::with_capacity(items as usize + 1);
+    prefix.push(0);
+    for index in 0..items {
+        let last = *prefix.last().unwrap_or(&0);
+        prefix.push(last + item_cost_with(index, heavy_end, heavy_cost, light_cost));
+    }
+    let total_cost = *prefix.last().unwrap_or(&0);
+    let prefix = Arc::new(prefix);
+
+    let individual = TaskSizeHints::individual(
+        move |range: IndexRange, sizes: &mut [i64]| {
+            for (offset, slot) in sizes.iter_mut().enumerate() {
+                *slot = item_cost_with(
+                    range.first() + offset as i64,
+                    heavy_end,
+                    heavy_cost,
+                    light_cost,
+                );
+            }
+        },
+        Some(total_cost),
+    );
+    let accumulated = TaskSizeHints::accumulated({
+        let prefix = Arc::clone(&prefix);
+        move |range: IndexRange| {
+            let begin = range.first().clamp(0, prefix.len() as i64 - 1) as usize;
+            let end = range.one_after_last().clamp(0, prefix.len() as i64 - 1) as usize;
+            prefix[end] - prefix[begin]
+        }
+    });
+
+    HintSet {
+        static_unit: TaskSizeHints::static_size(1),
+        individual,
+        accumulated,
+    }
+}
+
+fn serial_pass(
+    items: i64,
+    heavy_end: i64,
+    heavy_cost: i64,
+    light_cost: i64,
+) -> (std::time::Duration, u64) {
+    let started = Instant::now();
+    let mut work = 0u64;
+    for index in 0..items {
+        work = work.wrapping_add(burn(item_cost_with(
+            index, heavy_end, heavy_cost, light_cost,
+        )));
+    }
+    (started.elapsed(), work)
+}
+
+fn run_sweep(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let options = parse_sweep(args)?;
+
+    println!(
+        "chunked-parallel {} — strategy sweep",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("  items   : {}", options.items);
+    println!("  grains  : {:?}", options.grains);
+    println!("  heavy   : {:?}", options.heavy);
+    println!("  workers : {}", chunked_parallel::worker_threads());
+    println!("  repeats : {}", options.repeats);
+    println!(
+        "  concentration : {:.0}x (heavy item cost / light item cost)",
+        options.concentration
+    );
+    println!("  every row performs about the same total work; only its shape changes");
+    println!();
+
+    let mut csv = String::from("heavy_pct,grain,strategy,chunks,best_ms,median_ms,speedup\n");
+    let mut winners: Vec<(i64, Vec<(char, f64)>)> = Vec::new();
+    let mut crossovers: Vec<(i64, Option<i64>)> = Vec::new();
+
+    for &share in &options.heavy {
+        let heavy_end = options.items * share / 100;
+
+        // Hold the total work constant and vary only how concentrated it is.
+        // Otherwise the 0% row would do a thousandth of the work of the 50%
+        // row and the speedups would not be comparable.
+        const TARGET_WORK: f64 = 40_000_000.0;
+        let concentration = options.concentration.max(1.0);
+        let fraction = share as f64 / 100.0;
+        let light_cost = (TARGET_WORK
+            / (options.items as f64 * (fraction * concentration + 1.0 - fraction)))
+            .round()
+            .max(1.0) as i64;
+        let heavy_cost = ((light_cost as f64) * concentration).round().max(1.0) as i64;
+
+        let set = hint_set(options.items, heavy_end, heavy_cost, light_cost);
+        let (serial, expected_work) = serial_pass(options.items, heavy_end, heavy_cost, light_cost);
+        let bench = BenchOptions {
+            items: options.items,
+            grain: 0,
+            heavy_percent: share,
+            repeats: options.repeats,
+            heavy_cost,
+            light_cost,
+        };
+
+        let mut row: Vec<(char, f64)> = Vec::new();
+        let mut first_non_static = None;
+
+        for &grain in &options.grains {
+            let mut best_symbol = 'S';
+            let mut best_seconds = f64::MAX;
+            let mut best_speedup = 0.0f64;
+
+            for (symbol, name, hint) in [
+                ('S', "static(size=1)", &set.static_unit),
+                ('I', "individual", &set.individual),
+                ('A', "accumulated", &set.accumulated),
+            ] {
+                let row_result = measure(hint, &bench, heavy_end, expected_work, grain)?;
+                let seconds = row_result.best.as_secs_f64();
+                let speedup = serial.as_secs_f64() / seconds.max(f64::MIN_POSITIVE);
+                csv.push_str(&format!(
+                    "{share},{grain},{name},{},{:.4},{:.4},{:.3}\n",
+                    row_result.chunks,
+                    seconds * 1000.0,
+                    row_result.median.as_secs_f64() * 1000.0,
+                    speedup
+                ));
+                // 5% tolerance, so a tie is not decided by measurement noise;
+                // the simpler strategy keeps the win.
+                if seconds < best_seconds * 0.95 {
+                    best_seconds = seconds;
+                    best_symbol = symbol;
+                    best_speedup = speedup;
+                }
+            }
+
+            if best_symbol != 'S' && first_non_static.is_none() {
+                first_non_static = Some(grain);
+            }
+            row.push((best_symbol, best_speedup));
+        }
+
+        crossovers.push((share, first_non_static));
+        winners.push((share, row));
+    }
+
+    // Winner matrix.
+    print!("{:<11}", "heavy\\grain");
+    for grain in &options.grains {
+        print!("{grain:>6}");
+    }
+    println!();
+    for (share, row) in &winners {
+        print!("{share:>9}%  ");
+        for (symbol, _) in row {
+            print!("{symbol:>6}");
+        }
+        println!();
+    }
+    println!("  S = static(size=1)   I = individual   A = accumulated");
+    println!();
+
+    // Speedup of the winner.
+    print!("{:<11}", "best speedup");
+    for grain in &options.grains {
+        print!("{grain:>6}");
+    }
+    println!();
+    for (share, row) in &winners {
+        print!("{share:>9}%  ");
+        for (_, speedup) in row {
+            print!("{:>6.1}", speedup);
+        }
+        println!();
+    }
+    println!();
+
+    println!("crossover: first grain where static(size=1) is no longer the fastest");
+    for (share, crossover) in &crossovers {
+        match crossover {
+            Some(grain) => println!("  {share:>3}% heavy -> grain {grain}"),
+            None => println!("  {share:>3}% heavy -> never (uniform chunks stay ahead)"),
+        }
+    }
+    println!();
+    println!("speedups are against a serial loop on this machine: compare cells, not absolutes");
+
+    if let Some(path) = &options.csv {
+        std::fs::write(path, &csv).map_err(|error| format!("cannot write {path}: {error}"))?;
+        println!("wrote {path}");
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("graph") => run_graph(args.into_iter().skip(1)),
+        Some("sweep") => run_sweep(args.into_iter().skip(1)),
+        Some("bench") if args.get(1).map(String::as_str) == Some("--sweep") => {
+            run_sweep(args.into_iter().skip(2))
+        }
         Some("bench") => run_bench(args.into_iter().skip(1)),
         _ => run_range(args.into_iter()),
     };

@@ -267,6 +267,39 @@ The `static(size=20000)` row is the cautionary one: claiming a per-task size tha
 does not match reality explodes the chunk count to one item per chunk and caps
 the speedup near 2x whatever the grain is.
 
+## The sweep, and what it corrected
+
+`cpx sweep` repeats the measurement over a grid of grain values and heavy shares,
+holding total work constant so the rows stay comparable, and reports which
+strategy wins each cell.
+
+With a 100x cost concentration (a heavy item costs 100 light ones):
+
+| heavy \ grain | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 | 2048 |
+|---|---|---|---|---|---|---|---|---|---|
+| 0%  | S | S | S | S | S | S | S | S | S |
+| 10% | S | S | S | S | S | S | S | I | A |
+| 25% | S | S | S | S | S | S | S | S | I |
+| 50% | S | S | S | S | S | S | S | S | S |
+
+`S = static(size=1)`, `I = individual`, `A = accumulated`.
+
+The single-scenario benchmark above suggests the cost-aware hints win by a wide
+margin. **The sweep narrows that claim considerably.** With total work held
+constant:
+
+- uniform chunks win almost everywhere, including every fine grain;
+- the crossover happens only at the coarsest grains (1024–2048), where one chunk
+  would otherwise hold most of the work;
+- a 50% heavy share never crosses over, because ten coarse chunks still spread
+  across twelve workers;
+- `--concentration` controls how early the crossover appears (`15` pushes it to
+  2048, a larger value pulls it earlier).
+
+That is the useful result: the cost-aware hints are **insurance against a bad
+partition**, not a general speedup. Reach for them when the grain is coarse and
+the cost is lopsided — not by default.
+
 ## Library use
 
 ```rust

@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — Phase 5: the decision map
+
+### Added
+
+- `cpx sweep`: a grid over grain values and heavy shares that reports the winner
+  per cell, the best speedup per cell, the crossover grain per heavy share, and
+  an optional CSV export (`--csv`).
+- `--concentration` controls the heavy/light cost ratio; total work is held
+  constant across rows so cells are comparable.
+- A 5% tolerance so a tie is not decided by measurement noise: the simpler
+  strategy keeps the win.
+
+### Corrected
+
+- The single-scenario benchmark over-stated the value of the cost-aware hints.
+  The sweep shows uniform chunks winning at every fine grain, with a crossover
+  only at the coarsest grains (1024–2048) and never at a 50% heavy share. The
+  hints are insurance against a bad partition, not a general speedup.
+
 ## [0.4.0] — Phase 4: measure instead of assume
 
 ### Added
