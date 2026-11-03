@@ -36,6 +36,8 @@ pub(crate) struct Scope {
     pending: AtomicUsize,
     lock: Mutex<()>,
     cv: Condvar,
+    /// First panic raised by a job in this scope; re-raised on the waiter.
+    panic: Mutex<Option<Box<dyn std::any::Any + Send>>>,
 }
 
 impl Scope {
@@ -44,7 +46,19 @@ impl Scope {
             pending: AtomicUsize::new(0),
             lock: Mutex::new(()),
             cv: Condvar::new(),
+            panic: Mutex::new(None),
         })
+    }
+
+    fn record_panic(&self, payload: Box<dyn std::any::Any + Send>) {
+        let mut slot = self.panic.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(payload);
+        }
+    }
+
+    fn take_panic(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.panic.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     fn enter(&self) {
@@ -91,6 +105,15 @@ impl Scope {
                 .wait_timeout(guard, Duration::from_millis(5))
                 .unwrap_or_else(|p| p.into_inner());
         }
+
+        // This thread just finished waiting: run the hints workers deferred.
+        crate::lazy_threading::run_hints();
+
+        if let Some(payload) = self.take_panic() {
+            // Fail the wait, the way a panicking task fails a join, without
+            // destroying the worker that ran it.
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -104,9 +127,14 @@ impl Drop for ScopeGuard {
 }
 
 fn run_job(job: Job) {
-    let _guard = ScopeGuard(Arc::clone(&job.scope));
+    let scope = Arc::clone(&job.scope);
+    let _guard = ScopeGuard(Arc::clone(&scope));
     if let Some(func) = job.func {
-        func();
+        // A panicking task must not take the worker down with it: the payload
+        // is recorded on the scope and re-raised on whoever waits.
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(func)) {
+            scope.record_panic(payload);
+        }
     }
 }
 

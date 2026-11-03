@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — Phase 8: deferred hints and panic isolation
+
+### Added
+
+- `lazy_threading`: `send_hint`, `run_hints`, `pending`, `discard_hints`.
+  Workers defer work they should not do inline; the thread that finishes waiting
+  runs it. `parallel_for`, `parallel_range` and every pool/graph wait drain the
+  queue.
+- Panic isolation in the shared runtime: a panicking job is caught on the
+  worker, recorded on its scope, and re-raised on the waiter. The wait fails like
+  a panicking `join`; the worker survives and remaining tasks still run.
+- 5 robustness tests (39 total).
+
+### Fixed
+
+- A flaky interaction the new tests exposed: every wait drains the shared hint
+  queue, so tests that assert hint delivery were racing with tests that merely
+  wait. The robustness tests now serialise on one lock; 12 consecutive full-suite
+  runs are green.
+
 ## [0.7.0] — Phase 7: distribution and provenance
 
 ### Added

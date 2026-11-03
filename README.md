@@ -113,6 +113,21 @@ its current form:
 `foreach_segment_parallel` feeding segment sizes through an accumulated hint —
 precisely the case that hint exists for.
 
+## Robustness
+
+Two properties that a scheduler loses easily, and that this one keeps:
+
+**Deferred hints.** A worker that discovers work better done once — a lazy
+cache, a dependency update — does not do it inline while holding a chunk. It
+sends a hint (`lazy_threading::send_hint`) and keeps going; the thread that next
+finishes waiting runs it (`run_hints`). `parallel_for`, `parallel_range`, and
+every pool or graph wait drain the queue, so hints are not lost.
+
+**A failed task does not break the scheduler.** A panicking job is caught on the
+worker, recorded on its scope, and re-raised on whoever waits: the wait fails
+like a panicking `join`, the worker survives, and no other submitted task is
+dropped.
+
 ## Install
 
 ### Prebuilt binaries (recommended)
@@ -355,7 +370,7 @@ assert_eq!(done.stats.clones, done.stats.chunks);
 ## Verify
 
 ```sh
-cargo test --release     # 34 behavioural tests + 1 doctest
+cargo test --release     # 39 behavioural tests + 1 doctest
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

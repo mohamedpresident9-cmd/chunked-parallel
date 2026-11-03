@@ -154,6 +154,9 @@ where
         }
     };
 
+    // The thread that waited runs the hints the workers decided not to.
+    crate::lazy_threading::run_hints();
+
     Executed {
         chunk,
         stats: Stats {

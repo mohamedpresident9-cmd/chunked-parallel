@@ -382,6 +382,8 @@ where
     }
     let chunks = chunks_for(range, grain, hints);
     let _completed: Vec<()> = map_chunks(chunks, function);
+    // The caller just waited; run whatever the workers deferred.
+    crate::lazy_threading::run_hints();
 }
 
 /// Move sub-range boundaries down to the next aligned index.

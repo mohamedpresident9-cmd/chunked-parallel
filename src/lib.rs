@@ -98,6 +98,7 @@ mod pool;
 mod runtime;
 mod settings;
 
+pub mod lazy_threading;
 pub mod threading;
 
 pub use chunk::Chunk;
