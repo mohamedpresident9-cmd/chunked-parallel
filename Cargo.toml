@@ -1,9 +1,9 @@
-﻿[package]
+[package]
 name = "chunked-parallel"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.73"
-description = "Rust simulator of Blender BLI_task parallel-range data-flow semantics (grain size, firstprivate chunks, reduction merge)"
+description = "Rust model of Blender's task scheduling: parallel ranges, task pools, edge-triggered graphs, and the threading layer"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/mohamedpresident9-cmd/chunked-parallel"

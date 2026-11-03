@@ -47,6 +47,17 @@
 //!
 //! **Rule 4 — a suspended pool runs nothing until it is waited on.**
 //!
+//! ## Layer 3 — the modern `blender::threading` layer
+//!
+//! [`threading`] models `BLI_task.hh` as Blender itself now uses it:
+//! [`threading::parallel_for`] over an [`threading::IndexRange`] with
+//! [`threading::TaskSizeHints`], whose three hint types select three different
+//! splitting strategies (uniform, greedy bucketing, recursive bisection), plus
+//! `parallel_for_aligned`, `parallel_reduce`,
+//! `parallel_deterministic_reduce`, `max_threads_task`,
+//! `memory_bandwidth_bound_task` and an [`threading::IndexMask`] projection with
+//! segment-based parallelism.
+//!
 //! ## Design note
 //!
 //! [`parallel_range`] runs on scoped threads so the callback may borrow data
@@ -86,6 +97,8 @@ mod partitioner;
 mod pool;
 mod runtime;
 mod settings;
+
+pub mod threading;
 
 pub use chunk::Chunk;
 pub use engine::{current_thread_id, parallel_range, Executed, Stats};

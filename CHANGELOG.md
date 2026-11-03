@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — Phase 3: the modern `blender::threading` layer
+
+### Added
+
+- `threading::parallel_for` over `IndexRange` with `TaskSizeHints`, and the
+  three splitting strategies Blender uses: uniform blocks for `Static`, greedy
+  bucketing with an outer `min(grain, 512)` for `Individual`, recursive
+  bisection for `Accumulated`.
+- `use_single_thread`, so small work stays on the calling thread.
+- `parallel_for_aligned` with `align_sub_range`.
+- `parallel_reduce` (tree merge) and `parallel_deterministic_reduce` (ordered
+  merge).
+- `parallel_invoke2`, `max_threads_task` and `memory_bandwidth_bound_task`
+  (8 MiB cache threshold, 8-thread bandwidth cap).
+- `ExecutionMode::{Serial, Parallel, ParallelGrainSize}` with Blender's
+  `grain_size(fallback)` semantics.
+- `IndexMask` projection: range segments, chunked segments, index iteration and
+  `foreach_segment_parallel` driven by an accumulated size hint.
+- `cpx graph`: task-graph demonstrator with a live trace and an ASCII tree
+  showing real per-node run counts.
+- 13 new behavioural tests (34 total).
+
 ## [0.2.0] — Phase 2: task pools and dependency graphs
 
 ### Added

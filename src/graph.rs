@@ -27,6 +27,15 @@ impl NodeId {
     pub fn index(self) -> usize {
         self.0
     }
+
+    /// Rebuild a handle from an index.
+    ///
+    /// Handy for demos that keep their own node table. A handle that does not
+    /// exist in the graph it is used with is rejected by
+    /// [`TaskGraph::push_work`] rather than executed.
+    pub fn from_index(index: usize) -> Self {
+        Self(index)
+    }
 }
 
 struct Node {

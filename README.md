@@ -90,6 +90,29 @@ graph.wait();
 Priority is accepted and recorded but not acted upon: Blender drops it on
 TBB 2021+ (`TBB_INTERFACE_VERSION_MAJOR >= 12`), which Blender 5.x ships.
 
+## Layer 3 — the modern `blender::threading` layer
+
+`threading::parallel_for(range, grain, &hints, f)` takes a `TaskSizeHints`, and
+the hint type selects the splitting strategy — this is the "multi-part" logic in
+its current form:
+
+| Hint | Strategy (from `parallel_for_impl`) |
+|---|---|
+| `Static { size }` | `final_grain = grain / size`, uniform blocks |
+| `Individual { .. }` | outer blocks of `min(grain, 512)`, per-task sizes, **greedy bucketing** until a bucket reaches the grain |
+| `Accumulated { .. }` | **recursive bisection** until the accumulated size fits the grain |
+
+`use_single_thread` short-circuits small work back to the caller, because
+"invoking tbb for small workloads has a large overhead". Also modelled:
+`parallel_for_aligned` / `align_sub_range`, `parallel_reduce`,
+`parallel_deterministic_reduce`, `parallel_invoke2`, `max_threads_task`,
+`memory_bandwidth_bound_task` (8 MiB cache threshold, 8-thread bandwidth cap) and
+`ExecutionMode` (`Serial`, `Parallel`, `ParallelGrainSize`).
+
+`IndexMask` is a projection: ranges in, chunked segments out, with
+`foreach_segment_parallel` feeding segment sizes through an accumulated hint —
+precisely the case that hint exists for.
+
 ## Install
 
 ### Prebuilt binaries (recommended)
@@ -165,6 +188,12 @@ cpx [OPTIONS]
   --tree          tree-shaped merge (default)
   --det           deterministic (ordered) merge
   --repeats <N>   determinism check iterations          [default: 8]
+
+GRAPH OPTIONS (cpx graph):
+  --depth <N>     tree depth                            [default: 3]
+  --fanout <N>    children per node                     [default: 2]
+  --delay <MS>    simulated work per node               [default: 20]
+  --diamond       build root -> a,b -> c (c has 2 parents)
 ```
 
 Example:
@@ -182,6 +211,26 @@ bit-identical to serial : false
 
 `chunks == clones` (one copy per chunk) and `joins == chunks - 1` (a tree of
 `n-1` reductions) hold by construction; the tests assert both.
+
+Graph mode prints a live trace and then the tree with real run counts:
+
+```
+$ cpx graph --diamond --delay 5
+    0.41ms  run  root
+    5.52ms    run  a
+    5.55ms    run  b
+   10.63ms      run  c
+   10.65ms      run  c
+
+root  ×1
+├─ a  ×1
+│  └─ c  ×2
+└─ b  ×1
+   └─ c  ×2
+```
+
+`c` appears under both parents and ran twice: edge-triggered propagation, made
+visible instead of argued about.
 
 ## Library use
 
@@ -205,7 +254,7 @@ assert_eq!(done.stats.clones, done.stats.chunks);
 ## Verify
 
 ```sh
-cargo test --release     # 21 behavioural tests + 1 doctest
+cargo test --release     # 34 behavioural tests + 1 doctest
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -214,18 +263,29 @@ The suite asserts the invariants directly: no clone on the serial path, one
 clone per chunk on the parallel path, `n-1` joins, grain flooring, the
 `threads * 4` over-decomposition, run-to-run reproducibility of the ordered
 fold, suspended pools staying idle until waited on, serial pools never
-overlapping, nested pools not deadlocking, and a diamond graph triggering its
-shared child exactly twice.
+overlapping, nested pools not deadlocking, a diamond graph triggering its shared
+child exactly twice, greedy bucketing and recursive bisection producing the
+expected chunk boundaries, aligned sub-ranges snapping to their alignment, and
+`max_threads_task` actually capping concurrency.
 
 ## Scope
 
-Phases 1–2 are implemented: data-parallel ranges, `TaskPool` (all five
-flavours) and `TaskGraph` with edge-triggered propagation.
+Phases 1–3 are implemented:
 
-Not yet modelled: the newer `blender::threading` layer — `TaskSizeHints`
-(`Static`, `IndividualLookup` with greedy bucketing, `AccumulatedLookup` with
-recursive bisection), `IndexMask::foreach_segment`, `memory_bandwidth_bound_task`
-and `max_threads_task`. That is Phase 3.
+1. data-parallel ranges with `firstprivate` chunks and reduction merge;
+2. `TaskPool` (all five flavours) and `TaskGraph` with edge-triggered propagation;
+3. the `blender::threading` layer — `TaskSizeHints`, aligned ranges, reduce
+   variants, `max_threads_task`, `memory_bandwidth_bound_task`, `ExecutionMode`
+   and an `IndexMask` projection.
+
+Deliberately not modelled, and documented where it matters:
+
+- `isolate_task`: this executor joins scoped threads by blocking and never
+  drains another scope's queue, so the nested-threading hazard isolation
+  defends against cannot arise.
+- `parallel_invoke` is variadic in C++; here it is `parallel_invoke2`.
+- The full `IndexMask` (expression trees, virtual arrays) is out of scope; only
+  range segments and their parallel iteration are projected.
 
 ## License
 
