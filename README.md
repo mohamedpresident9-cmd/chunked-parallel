@@ -300,6 +300,27 @@ That is the useful result: the cost-aware hints are **insurance against a bad
 partition**, not a general speedup. Reach for them when the grain is coarse and
 the cost is lopsided — not by default.
 
+### Cost shape matters as much as grain
+
+`--shape` controls *where* the expensive items sit. Same 25% heavy share, same
+100x concentration, same total work:
+
+| shape | crossover at 25% heavy |
+|---|---|
+| `clustered` | grain 2048 (`accumulated` wins) |
+| `interleaved` | never |
+| `random` | never |
+
+When the cost is mixed at chunk scale, every chunk has roughly the same
+composition and uniform chunks are already balanced, so the hints have nothing
+to fix. They earn their keep only when the cost is **clustered on the scale of a
+chunk** — which is precisely what a coarse grain produces.
+
+Three mechanisms, one sentence each: grain decides how coarse the partition is;
+concentration decides how lopsided the pieces are; shape decides whether the
+lopsidedness lines up with the chunk boundaries. The hints only help when all
+three line up badly.
+
 ## Library use
 
 ```rust

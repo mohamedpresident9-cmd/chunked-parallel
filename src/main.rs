@@ -97,6 +97,8 @@ SWEEP OPTIONS (cpx sweep):
     --grains <LIST> comma separated grain values          [default: 8..2048]
     --repeats <N>   timed runs per cell                   [default: 2]
     --csv <PATH>    write every measurement as CSV
+    --shape <KIND>  clustered | interleaved | random    [default: clustered]
+    --concentration <X>  heavy/light cost ratio         [default: 100]
 
 Graph mode prints a live start/finish trace and, when done, the tree with the
 number of times each node actually ran. Ordering varies between runs: that is
@@ -496,6 +498,18 @@ const HEAVY_COST: i64 = 20_000;
 /// Cost of one ordinary item.
 const LIGHT_COST: i64 = 2;
 
+/// How the expensive items are distributed over the index space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// All expensive items first, then all cheap ones.
+    Clustered,
+    /// Expensive items spread evenly across the index space.
+    Interleaved,
+    /// Expensive items at deterministic pseudo-random positions.
+    Random,
+}
+
+#[derive(Clone)]
 struct BenchOptions {
     items: i64,
     grain: i64,
@@ -503,6 +517,37 @@ struct BenchOptions {
     repeats: usize,
     heavy_cost: i64,
     light_cost: i64,
+    heavy_end: i64,
+    shape: Shape,
+    mask: Option<std::sync::Arc<Vec<bool>>>,
+}
+
+fn pseudo_random(value: u64) -> u64 {
+    let mut x = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// Cost of one index under the configured shape.
+fn cost_at(index: i64, options: &BenchOptions) -> i64 {
+    let heavy = match options.shape {
+        Shape::Clustered => index < options.heavy_end,
+        Shape::Interleaved => {
+            let count = options.heavy_end;
+            (index + 1) * count / options.items > index * count / options.items
+        }
+        Shape::Random => options
+            .mask
+            .as_ref()
+            .map(|mask| mask[index as usize])
+            .unwrap_or(false),
+    };
+    if heavy {
+        options.heavy_cost
+    } else {
+        options.light_cost
+    }
 }
 
 struct BenchRow {
@@ -520,6 +565,9 @@ fn parse_bench(mut args: impl Iterator<Item = String>) -> Result<BenchOptions, S
         repeats: 3,
         heavy_cost: HEAVY_COST,
         light_cost: LIGHT_COST,
+        heavy_end: 2_000,
+        shape: Shape::Clustered,
+        mask: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -562,6 +610,7 @@ fn parse_bench(mut args: impl Iterator<Item = String>) -> Result<BenchOptions, S
         return Err("--items, --grain and --repeats must be positive".to_string());
     }
     options.heavy_percent = options.heavy_percent.clamp(0, 100);
+    options.heavy_end = options.items * options.heavy_percent / 100;
     Ok(options)
 }
 
@@ -594,7 +643,7 @@ fn burn(units: i64) -> u64 {
 fn measure(
     hints: &chunked_parallel::threading::TaskSizeHints,
     options: &BenchOptions,
-    heavy_end: i64,
+    _heavy_end: i64,
     expected_work: u64,
     grain: i64,
 ) -> Result<BenchRow, String> {
@@ -611,12 +660,7 @@ fn measure(
         parallel_for(range, grain, hints, |sub| {
             let mut local = 0u64;
             for index in sub.iter() {
-                local = local.wrapping_add(burn(item_cost_with(
-                    index,
-                    heavy_end,
-                    options.heavy_cost,
-                    options.light_cost,
-                )));
+                local = local.wrapping_add(burn(cost_at(index, options)));
             }
             work.fetch_add(local, Ordering::Relaxed);
         });
@@ -798,6 +842,7 @@ struct SweepOptions {
     repeats: usize,
     csv: Option<String>,
     concentration: f64,
+    shape: Shape,
 }
 
 struct HintSet {
@@ -824,6 +869,7 @@ fn parse_sweep(mut args: impl Iterator<Item = String>) -> Result<SweepOptions, S
         repeats: 2,
         csv: None,
         concentration: 100.0,
+        shape: Shape::Clustered,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -846,6 +892,19 @@ fn parse_sweep(mut args: impl Iterator<Item = String>) -> Result<SweepOptions, S
                     .map_err(|_| "--repeats expects an integer")?
             }
             "--csv" => options.csv = Some(args.next().ok_or("--csv needs a path")?),
+            "--shape" => {
+                let value = args.next().ok_or("--shape needs a value")?;
+                options.shape = match value.as_str() {
+                    "clustered" => Shape::Clustered,
+                    "interleaved" => Shape::Interleaved,
+                    "random" => Shape::Random,
+                    other => {
+                        return Err(format!(
+                            "unknown shape: {other} (clustered, interleaved, random)"
+                        ))
+                    }
+                }
+            }
             "--concentration" => {
                 options.concentration = args
                     .next()
@@ -881,28 +940,26 @@ fn parse_sweep(mut args: impl Iterator<Item = String>) -> Result<SweepOptions, S
 ///
 /// Mirrors the construction in `run_bench`; kept separate because the sweep
 /// rebuilds them per heavy share while `run_bench` builds them once.
-fn hint_set(items: i64, heavy_end: i64, heavy_cost: i64, light_cost: i64) -> HintSet {
+fn hint_set(options: &BenchOptions) -> HintSet {
     use chunked_parallel::threading::{IndexRange, TaskSizeHints};
     use std::sync::Arc;
 
+    let items = options.items;
     let mut prefix: Vec<i64> = Vec::with_capacity(items as usize + 1);
     prefix.push(0);
     for index in 0..items {
         let last = *prefix.last().unwrap_or(&0);
-        prefix.push(last + item_cost_with(index, heavy_end, heavy_cost, light_cost));
+        prefix.push(last + cost_at(index, options));
     }
     let total_cost = *prefix.last().unwrap_or(&0);
     let prefix = Arc::new(prefix);
 
+    // The per-task size lookup must outlive this call, so it owns a snapshot.
+    let snapshot = options.clone();
     let individual = TaskSizeHints::individual(
         move |range: IndexRange, sizes: &mut [i64]| {
             for (offset, slot) in sizes.iter_mut().enumerate() {
-                *slot = item_cost_with(
-                    range.first() + offset as i64,
-                    heavy_end,
-                    heavy_cost,
-                    light_cost,
-                );
+                *slot = cost_at(range.first() + offset as i64, &snapshot);
             }
         },
         Some(total_cost),
@@ -923,18 +980,11 @@ fn hint_set(items: i64, heavy_end: i64, heavy_cost: i64, light_cost: i64) -> Hin
     }
 }
 
-fn serial_pass(
-    items: i64,
-    heavy_end: i64,
-    heavy_cost: i64,
-    light_cost: i64,
-) -> (std::time::Duration, u64) {
+fn serial_pass(options: &BenchOptions) -> (std::time::Duration, u64) {
     let started = Instant::now();
     let mut work = 0u64;
-    for index in 0..items {
-        work = work.wrapping_add(burn(item_cost_with(
-            index, heavy_end, heavy_cost, light_cost,
-        )));
+    for index in 0..options.items {
+        work = work.wrapping_add(burn(cost_at(index, options)));
     }
     (started.elapsed(), work)
 }
@@ -955,6 +1005,7 @@ fn run_sweep(args: impl Iterator<Item = String>) -> Result<(), String> {
         "  concentration : {:.0}x (heavy item cost / light item cost)",
         options.concentration
     );
+    println!("  shape   : {:?}", options.shape);
     println!("  every row performs about the same total work; only its shape changes");
     println!();
 
@@ -963,22 +1014,37 @@ fn run_sweep(args: impl Iterator<Item = String>) -> Result<(), String> {
     let mut crossovers: Vec<(i64, Option<i64>)> = Vec::new();
 
     for &share in &options.heavy {
-        let heavy_end = options.items * share / 100;
+        let heavy_target = options.items * share / 100;
+
+        // Shapes differ only in *where* the expensive items sit.
+        let mask = if options.shape == Shape::Random {
+            Some(std::sync::Arc::new(
+                (0..options.items)
+                    .map(|index| {
+                        (pseudo_random(index as u64) % options.items as u64) < heavy_target as u64
+                    })
+                    .collect::<Vec<bool>>(),
+            ))
+        } else {
+            None
+        };
+        let heavy_count = match &mask {
+            Some(mask) => mask.iter().filter(|heavy| **heavy).count() as i64,
+            None => heavy_target,
+        };
 
         // Hold the total work constant and vary only how concentrated it is.
         // Otherwise the 0% row would do a thousandth of the work of the 50%
         // row and the speedups would not be comparable.
         const TARGET_WORK: f64 = 40_000_000.0;
         let concentration = options.concentration.max(1.0);
-        let fraction = share as f64 / 100.0;
+        let fraction = heavy_count as f64 / options.items as f64;
         let light_cost = (TARGET_WORK
             / (options.items as f64 * (fraction * concentration + 1.0 - fraction)))
             .round()
             .max(1.0) as i64;
         let heavy_cost = ((light_cost as f64) * concentration).round().max(1.0) as i64;
 
-        let set = hint_set(options.items, heavy_end, heavy_cost, light_cost);
-        let (serial, expected_work) = serial_pass(options.items, heavy_end, heavy_cost, light_cost);
         let bench = BenchOptions {
             items: options.items,
             grain: 0,
@@ -986,7 +1052,12 @@ fn run_sweep(args: impl Iterator<Item = String>) -> Result<(), String> {
             repeats: options.repeats,
             heavy_cost,
             light_cost,
+            heavy_end: heavy_count,
+            shape: options.shape,
+            mask,
         };
+        let set = hint_set(&bench);
+        let (serial, expected_work) = serial_pass(&bench);
 
         let mut row: Vec<(char, f64)> = Vec::new();
         let mut first_non_static = None;
@@ -1001,7 +1072,7 @@ fn run_sweep(args: impl Iterator<Item = String>) -> Result<(), String> {
                 ('I', "individual", &set.individual),
                 ('A', "accumulated", &set.accumulated),
             ] {
-                let row_result = measure(hint, &bench, heavy_end, expected_work, grain)?;
+                let row_result = measure(hint, &bench, heavy_count, expected_work, grain)?;
                 let seconds = row_result.best.as_secs_f64();
                 let speedup = serial.as_secs_f64() / seconds.max(f64::MIN_POSITIVE);
                 csv.push_str(&format!(

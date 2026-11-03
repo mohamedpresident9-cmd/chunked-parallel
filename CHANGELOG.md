@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — Phase 6: cost shape
+
+### Added
+
+- `cpx sweep --shape clustered|interleaved|random`: where the expensive items sit
+  becomes a variable. `random` uses a deterministic hash so runs are repeatable.
+- Costs are now derived from the *actual* heavy count, so a random mask that
+  draws a slightly different number of heavy items still hits the same total
+  work.
+
+### Learned
+
+- With a 25% heavy share the crossover disappears for `interleaved` and `random`
+  while it stays at grain 2048 for `clustered`. The hints only matter when the
+  cost is lopsided *on the scale of a chunk*; a uniform mix leaves nothing to
+  fix.
+
 ## [0.5.0] — Phase 5: the decision map
 
 ### Added
